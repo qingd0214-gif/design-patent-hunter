@@ -1,0 +1,8 @@
+node_modules/
+patent_profile/
+credentials.json
+*.zip
+out/
+.tmp/
+.workbuddy/
+*.log
