@@ -20,6 +20,7 @@ async function main() {
   const scale = dpi / 72;
   const authorArg = process.argv.indexOf('--author');
   const author = authorArg >= 0 ? process.argv[authorArg + 1] : '';
+  const whiteBg = process.argv.includes('--white'); // 白底线稿模式：不转透明，墨迹边界按亮度检测
 
   const pdfjsLib = await import('pdfjs-dist/legacy/build/pdf.mjs');
   const data = new Uint8Array(fs.readFileSync(pdfPath));
@@ -97,22 +98,33 @@ async function main() {
         const crop = createCanvas(cw, ch);
         const cctx = crop.getContext('2d');
         cctx.drawImage(canvas, Math.round(x0), Math.round(y0), cw, ch, 0, 0, cw, ch);
-        // 白底转透明：近白像素透明，边缘反锯齿渐变，灰阶照片区不受影响
+        // 白底转透明：近白像素透明，边缘反锯齿渐变，灰阶照片区不受影响（--white 模式跳过，保留白底）
         const img = cctx.getImageData(0, 0, cw, ch);
         const d = img.data;
         const HI = 248, LO = 225; // min(r,g,b) >= HI 全透明，<= LO 不透明，中间线性过渡
-        for (let i = 0; i < d.length; i += 4) {
-          const m = Math.min(d[i], d[i + 1], d[i + 2]);
-          if (m >= HI) d[i + 3] = 0;
-          else if (m > LO) d[i + 3] = Math.round(255 * (HI - m) / (HI - LO));
+        if (!whiteBg) {
+          for (let i = 0; i < d.length; i += 4) {
+            const m = Math.min(d[i], d[i + 1], d[i + 2]);
+            if (m >= HI) d[i + 3] = 0;
+            else if (m > LO) d[i + 3] = Math.round(255 * (HI - m) / (HI - LO));
+          }
+        } else {
+          // 白底模式：确保背景为纯白（渲染可能带轻微灰底）
+          for (let i = 0; i < d.length; i += 4) {
+            const m = Math.min(d[i], d[i + 1], d[i + 2]);
+            if (m >= HI) { d[i] = 255; d[i + 1] = 255; d[i + 2] = 255; }
+          }
         }
         cctx.putImageData(img, 0, 0);
-        // 墨迹包围盒收紧：按 alpha 检测实际图形边界，裁到原始上传图的精确范围
+        // 墨迹包围盒收紧：--white 按亮度检测墨迹，否则按 alpha
         const PAD = 0;
         let minX = cw, minY = ch, maxX = -1, maxY = -1;
         for (let y = 0; y < ch; y++) {
           for (let x = 0; x < cw; x++) {
-            if (d[(y * cw + x) * 4 + 3] > 16) {
+            const ink = whiteBg
+              ? Math.min(d[(y * cw + x) * 4], d[(y * cw + x) * 4 + 1], d[(y * cw + x) * 4 + 2]) < 210
+              : d[(y * cw + x) * 4 + 3] > 16;
+            if (ink) {
               if (x < minX) minX = x;
               if (x > maxX) maxX = x;
               if (y < minY) minY = y;
