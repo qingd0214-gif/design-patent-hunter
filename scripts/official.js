@@ -9,9 +9,14 @@ const { unzip } = require('./zip.js');
 const EXPORT_API = '/api/pubsearch-app-tools/tools/literature/export';
 const FIELDS = ['TIVIEW', 'ANID', 'APD', 'PNID', 'PD', 'IC', 'PAVIEW', 'INVIEW', 'PR', 'ABVIEW', 'ABS_IMG', 'DESC', 'CLMS', 'FULLTEXT_IMG'];
 
-// 申请号规范化：CN202130547907.0 / CN202130547907 → CN202130547907
+// 申请号规范化：CN202130547907.0 / 202130547907 → CN202130547907（保留 CN 前缀，去小数点）
+// 重要：导出接口的 anId 不带校验位！CN202530344171.5 → CN202530344171（带校验位会报 400/500）
 function normalizeAppNo(s = '') {
-  return String(s).replace(/^CN/i, '').replace(/[.\s]/g, '').trim();
+  let t = String(s).replace(/[.\s]/g, '').trim().toUpperCase();
+  if (!t.startsWith('CN')) t = 'CN' + t;
+  // 13 位 = 12 位主编号 + 1 位校验位，去掉校验位
+  if (/^CN\d{13}$/.test(t)) t = t.slice(0, 14);
+  return t;
 }
 
 async function getToken(page) {
