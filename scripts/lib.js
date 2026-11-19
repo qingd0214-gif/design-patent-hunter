@@ -120,14 +120,24 @@ async function search(page, ctx, { query, designOnly = true, maxPages = 10 }) {
 
   const popupPromise = ctx.waitForEvent('page', { timeout: 20000 }).catch(() => null);
   await page.locator('div.btn', { hasText: '检索' }).first().click();
-  const popup = await popupPromise;
-  const list = popup || page;
-  await list.waitForTimeout(6000);
-  if (!list.url().includes('retrieveList')) {
-    throw new Error('检索未跳转到结果页，当前 URL: ' + list.url());
+  await popupPromise;
+  // 点检索可能先弹门户欢迎页，轮询等真正的结果页标签
+  let list = null;
+  for (let i = 0; i < 20; i++) {
+    list = ctx.pages().find(p => p.url().includes('retrieveList'));
+    if (list) break;
+    await sleep(1000);
   }
+  if (!list) throw new Error('检索未跳转到结果页');
 
   if (designOnly) await filterDesign(list);
+
+  // 轮询等结果真正渲染（“N 条数据”出现且行内容就位）
+  for (let i = 0; i < 20; i++) {
+    const ready = await list.evaluate(() => /条数据/.test(document.body.innerText) && /CN\d{6,}[SU]/.test(document.body.innerText)).catch(() => false);
+    if (ready) break;
+    await sleep(1500);
+  }
 
   const records = [];
   for (let p = 0; p < maxPages; p++) {
