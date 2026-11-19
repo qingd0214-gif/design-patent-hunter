@@ -6,7 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const { createCanvas } = require('@napi-rs/canvas');
 
-const VIEW_RE = /设计\s*(\d+)\s*(主视图|后视图|左视图|右视图|俯视图|仰视图|立体图|剖视图)/;
+const VIEW_RE = /^(设计\s*(\d+))?\s*(主视图|后视图|左视图|右视图|俯视图|仰视图|立体图|剖视图)/;
 const CAP_TOP_PAD = 14;     // 视图底部与标题/表格线之间留白（已含标题字底与网格线）
 const COL_GAP = 6;          // 左右栏裁切时的中缝余量
 const FIRST_TOP_PT = 80;    // 每栏首个视图的上界（页眉表格线之下）
@@ -41,7 +41,7 @@ async function main() {
       const tx = pdfjsLib.Util.transform(viewport.transform, it.transform);
       const x = tx[4], yTop = tx[5] - it.height * scale, yBot = tx[5];
       const w = (it.width || 0) * scale;
-      caps.push({ name: `${m[1]}${m[2]}`, x, yTop, yBot, w, mid: x + w / 2 });
+      caps.push({ name: m[2] ? `设计${m[2]}${m[3]}` : m[3], x, yTop, yBot, w, mid: x + w / 2 });
     }
     if (!caps.length) continue;
 
@@ -126,7 +126,7 @@ async function main() {
         const tw = maxX - minX + 1, th = maxY - minY + 1;
         const tight = createCanvas(tw, th);
         tight.getContext('2d').drawImage(crop, minX, minY, tw, th, 0, 0, tw, th);
-        saved.push({ name: `设计${cap.name}`, page: pno, px: `${tw}x${th}`, pageCapCount, buf: tight.toBuffer('image/png') });
+        saved.push({ name: cap.name, page: pno, px: `${tw}x${th}`, pageCapCount, buf: tight.toBuffer('image/png') });
       }
     }
   }
