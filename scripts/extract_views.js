@@ -1,7 +1,7 @@
 // extract_views.js — 从 CNIPA 公告文本 PDF 提取各视图原图，按原始视角名称命名
 // 原理：pdfjs 渲染整页 + 从文字层找「设计N主视图」等标题，按「视图在标题正上方、左右两栏」的版式裁切
-// 白底转透明（近白像素抠掉，保留反锯齿边缘与灰阶照片区），文件名：作者_视图名_宽x高.png
-// 用法: node extract_views.js <patent.pdf> <outDir> [--dpi 300] [--author 苹果公司]
+// 默认输出白底线稿（保留 PDF 原貌）；--alpha 才转透明背景。文件名：作者_视图名_宽x高.png
+// 用法: node extract_views.js <patent.pdf> <outDir> [--dpi 300] [--author 苹果公司] [--alpha]
 const fs = require('fs');
 const path = require('path');
 const { createCanvas } = require('@napi-rs/canvas');
@@ -20,7 +20,7 @@ async function main() {
   const scale = dpi / 72;
   const authorArg = process.argv.indexOf('--author');
   const author = authorArg >= 0 ? process.argv[authorArg + 1] : '';
-  const whiteBg = process.argv.includes('--white'); // 白底线稿模式：不转透明，墨迹边界按亮度检测
+  const whiteBg = !process.argv.includes('--alpha'); // 默认白底线稿；--alpha 才输出透明背景
 
   const pdfjsLib = await import('pdfjs-dist/legacy/build/pdf.mjs');
   const data = new Uint8Array(fs.readFileSync(pdfPath));
@@ -98,7 +98,7 @@ async function main() {
         const crop = createCanvas(cw, ch);
         const cctx = crop.getContext('2d');
         cctx.drawImage(canvas, Math.round(x0), Math.round(y0), cw, ch, 0, 0, cw, ch);
-        // 白底转透明：近白像素透明，边缘反锯齿渐变，灰阶照片区不受影响（--white 模式跳过，保留白底）
+// 白底转透明：仅 --alpha 模式启用；默认保留白底（用户偏好：建模用白底线稿）
         const img = cctx.getImageData(0, 0, cw, ch);
         const d = img.data;
         const HI = 248, LO = 225; // min(r,g,b) >= HI 全透明，<= LO 不透明，中间线性过渡
