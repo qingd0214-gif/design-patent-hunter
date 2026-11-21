@@ -1,11 +1,11 @@
 # design-patent-hunter 外观专利猎手
 
-拍一张产品照片，自动完成：**AI 认图 → CNIPA 外观设计专利检索 → 下载官方公告 PDF → 提取各视图原图（透明底 / 规范命名）**。
+拍一张产品照片，自动完成：**AI 认图 → CNIPA 外观设计专利检索 → 下载官方公告 PDF → 提取各视图原图（白底线稿 / 规范命名）**。
 
 最终交付两样东西：
 
 1. `<申请号>_FullTextImage.pdf` —— 国家知识产权局授权公告文本**官方原件**（扉页 + 全部视图 + 简要说明）
-2. `views/` 文件夹 —— 各视图透明底 PNG，按 `作者_设计N视图_宽x高.png` 命名，可直接导入建模软件还原 3D 模型
+2. `views/` 文件夹 —— 各视图白底线稿 PNG（保留 PDF 原貌），按 `作者_设计N视图_宽x高.png` 命名，可直接导入建模软件还原 3D 模型
 
 ```
 产品照片
@@ -19,7 +19,7 @@ CNIPA 专利检索及分析系统（pss-system.cponline.cnipa.gov.cn）
 官方导出接口（一次调用打包全部申请号）
    ▼
 ├── <申请号>_FullTextImage.pdf   官方公告文本
-└── views/                       各视图透明底 PNG（墨迹包围盒精确裁切）
+└── views/                       各视图白底线稿 PNG（墨迹包围盒精确裁切，--alpha 可选透明底）
 ```
 
 ## 实测效果
@@ -54,7 +54,7 @@ node scripts/run.js search --query "遥控器 AND 苹果公司" --max 30 --out .
 # 3. 下载官方公告 PDF
 node scripts/run.js fetch --ids CN307048716S --out ./out/产品名
 
-# 4. 从 PDF 提取各视图（透明底，按作者_视角_尺寸命名）
+# 4. 从 PDF 提取各视图（白底线稿，按作者_视角_尺寸命名；加 --alpha 输出透明底）
 node scripts/extract_views.js <公告PDF> ./out/产品名/views --author 苹果公司
 ```
 
@@ -69,7 +69,7 @@ node scripts/extract_views.js <公告PDF> ./out/产品名/views --author 苹果�
 │   ├── run.js                # 主流程：search / fetch / all
 │   ├── official.js           # CNIPA 官方导出接口（Bearer token + 批量 zip）
 │   ├── zip.js                # 零依赖 ZIP 解包（GBK 文件名兼容）
-│   ├── extract_views.js      # 整页渲染 + 标题定位 + 墨迹包围盒裁切 + 白底转透明
+│   ├── extract_views.js      # 整页渲染 + 标题定位 + 墨迹包围盒裁切（默认白底，--alpha 转透明）
 │   ├── extract_native.js     # 内嵌位图原生分辨率抽取（CTM 几何配对标题）
 │   ├── pdf.js                # Chrome 无头 HTML→PDF（兜底公告文本合成）
 │   ├── doc.js                # 公告文本版式
@@ -82,11 +82,12 @@ node scripts/extract_views.js <公告PDF> ./out/产品名/views --author 苹果�
 └── demo/                     # Siri Remote 端到端实测样例
 ```
 
-## 两套视图输出
+## 视图输出模式
 
 | 输出 | 说明 | 适用 |
 |---|---|---|
-| `extract_views.js`（默认） | 300dpi 渲染 + 墨迹包围盒收紧，如 164×604 | 建模参考、展示（推荐） |
+| `extract_views.js`（默认白底） | 300dpi 渲染 + 墨迹包围盒收紧，如 164×604，保留 PDF 原貌 | 建模参考、展示（推荐） |
+| `extract_views.js --alpha` | 同上，但白底转透明 | 需要透明背景的场景 |
 | `extract_native.js --transparent` | PDF 内嵌位图原生分辨率，如 82×302，零插值 | 追求零失真 |
 
 说明：CNIPA 公告 PDF 里的视图是**内嵌位图**（非矢量），存储分辨率约为版面显示的一半。两款工具都从同一数据源出发，前者平滑放大，后者保留原生像素。
