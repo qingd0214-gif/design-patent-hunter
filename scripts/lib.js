@@ -72,44 +72,280 @@ function readCreds() {
   } catch { return null; }
 }
 
-// 确保处于已登录的检索页；返回 { page, loggedIn, needLogin }
+// 确保处于已登录状态；返回 { page, loggedIn, needLogin }
+// 判定依据改为 sessionId cookie（40 分钟有效），不再看页面文案——
+// 旧实现用「有没有关键词输入框」判断，踩过误判 loggedIn=true 后拿失效会话空转 12 分钟的坑。
 async function ensureLoggedIn(ctx, { allowAutoLogin = true } = {}) {
-  let page = pickPage(ctx, { prefer: 'conventionalSearch' }) || await ctx.newPage();
-  if (!page.url().includes('cponline')) {
-    await page.goto(BASE + '/conventionalSearch', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
+  const sess = await checkSession(ctx);
+  let page = pickPage(ctx, { prefer: 'conventionalSearch' });
+  if (sess.ok) {
+    if (!page || !page.url().includes('cponline')) page = await ctx.newPage();
+    return { page, loggedIn: true, minutesLeft: sess.minutes };
   }
-  await page.waitForTimeout(2500);
-  if (!isLoginUrl(page.url())) {
-    const hasInput = await page.locator('input[placeholder*="关键词"]').count().catch(() => 0);
-    if (hasInput) return { page, loggedIn: true };
-  }
-  // 需要登录
+  // 需要（重新）登录
   const cred = allowAutoLogin ? readCreds() : null;
-  if (!cred) return { page, loggedIn: false, needLogin: true };
+  if (!cred) return { page, loggedIn: false, needLogin: true, minutesLeft: sess.minutes };
 
-  if (!isLoginUrl(page.url())) {
-    await page.goto('https://tysf.cponline.cnipa.gov.cn/am/#/user/login', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
-    await page.waitForTimeout(2500);
-  }
+  const lp = await ctx.newPage();
+  await lp.goto('https://tysf.cponline.cnipa.gov.cn/am/#/user/login', { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
+  await lp.waitForTimeout(2500);
   try {
-    await page.locator('input[placeholder*="手机号"]').first().fill(cred.account, { timeout: 15000 });
-    await page.locator('input[type="password"]').first().fill(cred.password, { timeout: 10000 });
+    await lp.locator('input[placeholder*="手机号"]').first().fill(cred.account, { timeout: 15000 });
+    await lp.locator('input[type="password"]').first().fill(cred.password, { timeout: 10000 });
     await sleep(400);
-    await page.locator('button:has-text("登录"), .el-button:has-text("登录")').first().click();
-    await page.waitForTimeout(7000);
-    // 登录后回到检索页
-    if (!page.url().includes('conventionalSearch')) {
-      await page.goto(BASE + '/conventionalSearch', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
-      await page.waitForTimeout(3000);
+    await lp.locator('button:has-text("登录"), .el-button:has-text("登录")').first().click();
+    // 登录可能弹滑块：轮询等 sessionId 出现/刷新，最多 45 秒
+    let ok = false;
+    for (let i = 0; i < 15; i++) {
+      await lp.waitForTimeout(3000);
+      const s = await checkSession(ctx, { minMinutes: 1 });
+      if (s.ok) { ok = true; break; }
     }
-    const ok = await page.locator('input[placeholder*="关键词"]').count().catch(() => 0);
-    return { page, loggedIn: !!ok, needLogin: !ok };
+    await lp.close().catch(() => {});
+    return { page: pickPage(ctx, { prefer: 'conventionalSearch' }), loggedIn: ok, needLogin: !ok, minutesLeft: ok ? 'auto' : 0 };
   } catch (e) {
-    return { page, loggedIn: false, needLogin: true, error: e.message };
+    return { page: lp, loggedIn: false, needLogin: true, error: e.message };
   }
 }
 
-// 执行检索。opts: { query, designOnly=true, maxPages=10 }
+// ==========================================================================
+// 新链路（2026-11-22 验证）：高级检索 /seniorSearch + 每页 40 + .el-pager 翻页
+// 旧链路 search()（常规检索 + 筛选芯片）保留兼容，但不要再用于新任务：
+//   - 筛选芯片是 div 假芯片，状态易丢，常导致「暂无检索数据」
+//   - 分页控件不是 li，旧 goNext 永远点不到（这是 30 分钟空转的根因）
+// ==========================================================================
+
+const BASE_SENIOR = BASE + '/seniorSearch';
+
+// 瑞数反爬会先返回 HTTP 412 挑战页（DOM 全空，html 只有 39 字符），跑完 JS 才真正渲染。
+// 直接 waitForSelector 会因上下文被替换而失败 —— 必须先等 body 有内容。这是「白屏」的真因。
+async function gotoWithChallenge(p, url, { tries = 3, settle = 40000 } = {}) {
+  for (let i = 0; i < tries; i++) {
+    await p.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
+    const ok = await p.waitForFunction(
+      () => document.body && document.body.innerText.trim().length > 150,
+      { timeout: settle }
+    ).then(() => true).catch(() => false);
+    if (ok) return true;
+    await sleep(2000);
+  }
+  return false;
+}
+
+// 会话守卫：看 sessionId cookie 剩余时间（实测有效期 40 分钟）
+async function checkSession(ctx, { minMinutes = 6 } = {}) {
+  const cs = (await ctx.cookies()).filter(c => /cponline/.test(c.domain) && c.name === 'sessionId');
+  if (!cs.length) return { ok: false, reason: 'NO_SESSION', minutes: 0 };
+  const left = (cs[0].expires * 1000 - Date.now()) / 60000;
+  return { ok: left > minMinutes, reason: left > minMinutes ? 'OK' : 'EXPIRING', minutes: Math.round(left) };
+}
+
+// 在高级检索页勾选检索范围（发明/实用新型/外观设计）
+async function pickScope(page, names = ['外观设计']) {
+  for (const nm of names) {
+    const el = page.locator('.searchLiLabel span', { hasText: new RegExp('^\\s*' + nm + '\\s*$') }).first();
+    if (!(await el.count())) continue;
+    await el.click({ timeout: 8000 }).catch(() => {});
+    await page.waitForTimeout(400);
+  }
+  return await page.evaluate(() => [...document.querySelectorAll('.searchLiLabel span')]
+    .filter(e => /hover/.test(e.className) || /active|selected/.test(e.className))
+    .map(e => e.textContent.trim()));
+}
+
+// 高级检索：一次搞定「外观设计 + 名称/申请人」服务端筛选
+// opts: { name, applicant, extraExpr, designOnly, pageSize, timeoutMs }
+async function seniorSearch(ctx, { name, applicant, extraExpr = '', designOnly = true, pageSize = 40, onLog = () => {} } = {}) {
+  // 关掉旧结果页，避免选错标签（新旧标签 URL 完全相同，是之前「拿到旧列表」的隐藏坑）
+  for (const p of ctx.pages().filter(x => x.url().includes('retrieveList'))) await p.close().catch(() => {});
+
+  const p = await ctx.newPage();
+  const ok1 = await gotoWithChallenge(p, BASE_SENIOR);
+  if (!ok1) throw new Error('高级检索页未渲染（412 挑战未通过，可能触发风控，稍后重试）');
+  // 注意 state 必须是 attached：检索式 textarea 初始处于隐藏面板里，visible 会一直等不到
+  const ready = await p.waitForSelector('textarea.el-textarea__inner', { state: 'attached', timeout: 25000 }).then(() => true).catch(() => false);
+  if (!ready) throw new Error('高级检索页无检索式输入框（页面结构可能已改版）');
+  // 必须给 SPA 完整初始化时间：过早提交会打开一个永远不加载数据的空白结果页（实测踩过）
+  await p.waitForTimeout(5000);
+  // 等检索项列表真正渲染（过早点击字段名不会注册到表单模型，导致检索式为空）
+  await p.locator(':text-is("发明名称")').first().waitFor({ state: 'visible', timeout: 20000 }).catch(() => {});
+
+  if (designOnly) await pickScope(p, ['外观设计']);
+
+  // 关键：必须先点字段名，让前端把检索项注册进表单模型（textarea 只是投影，直接 fill 不生效）
+  const parts = [];
+  if (name) {
+    const ok1 = await clickField(p, '发明名称');
+    if (!ok1) throw new Error('点击「发明名称」未注册检索项（页面未就绪）');
+    parts.push(`发明名称=(${name})`);
+  }
+  if (applicant) {
+    const ok2 = await clickField(p, '申请（专利权）人');
+    if (!ok2) throw new Error('点击「申请（专利权）人」未注册检索项（页面未就绪）');
+    parts.push(`申请（专利权）人=(${applicant})`);
+  }
+  if (extraExpr) parts.push(extraExpr);
+  const expr = parts.join(' AND ');
+
+  await p.locator('textarea.el-textarea__inner').fill(expr);
+  await p.waitForTimeout(400);
+  const gotVal = await p.locator('textarea.el-textarea__inner').inputValue().catch(() => '');
+  if (gotVal !== expr) throw new Error('检索式未写入：' + gotVal);
+
+  const btn = p.locator('div.btn,button,.el-button').filter({ hasText: /^\s*检索\s*$/ }).first();
+  await btn.waitFor({ state: 'visible', timeout: 20000 });
+
+  // 点检索会开新标签；新标签偶发卡在 412 挑战不渲染。
+  // 表单状态仍在，直接再点一次检索即可重开标签 —— 最多 3 次。
+  let list = null;
+  for (let attempt = 0; attempt < 3 && !list; attempt++) {
+    if (attempt > 0) onLog(`重新点检索（第 ${attempt + 1} 次）`);
+    await btn.click({ timeout: 15000 }).catch(() => {});
+
+    let cand = null;
+    for (let i = 0; i < 40; i++) {
+      await p.waitForTimeout(1000);
+      const ls = ctx.pages().filter(x => x.url().includes('retrieveList'));
+      if (ls.length) { cand = ls[ls.length - 1]; break; }
+    }
+    if (!cand) { onLog('未出现结果页'); continue; }
+    await cand.bringToFront();
+
+    const hasBody = await cand.waitForFunction(() => document.body && document.body.innerText.trim().length > 150, { timeout: 30000 }).then(() => true).catch(() => false);
+    const hasData = hasBody && await cand.waitForFunction(() => /(\d+)\s*条数据/.test(document.body.innerText), { timeout: 25000 }).then(() => true).catch(() => false);
+    onLog(`attempt#${attempt} body=${hasBody} data=${hasData} url=${cand.url().slice(-30)}`);
+    if (hasData) { list = cand; break; }
+    await cand.close().catch(() => {});
+    await p.bringToFront();
+    await p.waitForTimeout(1500);
+  }
+  if (!list) throw new Error('结果页始终未渲染（412 风控），稍后重试或手动在窗口里检索一次');
+  onLog('list ready: ' + list.url());
+
+  let info = { total: null, rows: [], nextEnabled: false };
+  for (let i = 0; i < 12; i++) {
+    info = await readPage(list).catch(e => { onLog('readPage err ' + e.message.slice(0, 80)); return info; });
+    if (info.total !== null && info.rows.length > 0) break;
+    await list.waitForTimeout(900);
+  }
+  onLog(`total=${info.total} rows=${info.rows.length}`);
+  if (info.total === null) throw new Error('结果页无数据（检索式可能未提交）：' + expr);
+  if (pageSize && pageSize !== 10) await setPageSize(list, pageSize).catch(() => {});
+  return { listPage: list, searchPage: p, expr, total: info.total, firstPageRows: (await readPage(list)).rows };
+}
+
+// 点检索项字段名，让前端插入 <字段>=() 模板；返回是否真的注册成功
+async function clickField(page, label) {
+  const el = page.locator(`:text-is("${label}")`).first();
+  if (!(await el.count())) return false;
+  await el.waitFor({ state: 'visible', timeout: 15000 }).catch(() => {});
+  const ta = page.locator('textarea.el-textarea__inner');
+  const before = await ta.inputValue().catch(() => '');
+  await el.click({ timeout: 8000 }).catch(() => {});
+  await page.waitForTimeout(600);
+  const after = await ta.inputValue().catch(() => '');
+  return after !== before && after.includes(label.slice(0, 4));
+}
+
+// 每页条数：5/10/20/30/40
+async function setPageSize(page, n) {
+  const sel = page.locator('.el-select').filter({ hasText: '条/页' }).first();
+  await sel.click({ timeout: 8000 });
+  await page.waitForTimeout(500);
+  const opt = page.locator('.el-select-dropdown__item', { hasText: `${n} 条/页` }).first();
+  await opt.click({ force: true, timeout: 8000 });
+  await page.waitForTimeout(3000);
+  return n;
+}
+
+// 读当前页：叶节点公开号 → 向上爬到行容器，取 5 个字段
+// （禁用 innerText 全局正则：跨行会把邻行标题错配到本行，这是 Beats 误配的根源）
+async function readPage(page) {
+  return await page.evaluate(() => {
+    const rows = [];
+    const anchors = [...document.querySelectorAll('*')]
+      .filter(e => e.children.length === 0 && /^CN\d{6,}[SU]$/.test((e.textContent || '').trim()));
+    for (const a of anchors) {
+      let row = a;
+      for (let i = 0; i < 8 && row.parentElement; i++) {
+        row = row.parentElement;
+        const t = row.innerText || '';
+        if (/CN\d{6,}[SU]/.test(t) && /CN\d{11,13}/.test(t) && t.length < 900) break;
+      }
+      const L = (row.innerText || '').split('\n').map(s => s.trim()).filter(Boolean);
+      rows.push({ pn: a.textContent.trim(), ap: L[1] || '', apd: L[2] || '', ti: L[3] || '', pa: L[4] || '' });
+    }
+    const m = document.body.innerText.match(/(\d+)\s*条数据/);
+    const nx = document.querySelector('.el-pager li.btn-next, .btn-next');
+    return {
+      total: m ? Number(m[1]) : null,
+      rows,
+      nextEnabled: nx ? !nx.disabled && !/is-disabled|disabled/.test(nx.className) : false,
+      curPage: (document.querySelector('.el-pager li.number.active') || {}).textContent || ''
+    };
+  });
+}
+
+async function nextPage(page) {
+  const nx = page.locator('.el-pager li.btn-next, .btn-next').first();
+  if (!(await nx.count())) return false;
+  const dis = await nx.evaluate(e => e.disabled || /is-disabled|disabled/.test(e.className)).catch(() => true);
+  if (dis) return false;
+  const before = (await readPage(page)).rows[0];
+  await nx.click({ timeout: 8000 }).catch(() => {});
+  for (let i = 0; i < 12; i++) {
+    await page.waitForTimeout(900);
+    const now = (await readPage(page)).rows[0];
+    if (now && (!before || now.pn !== before.pn)) return true;
+  }
+  return false;
+}
+
+// 断言：申请号年份必须与申请日一致（防错行）
+function auditRows(rows) {
+  const warnings = [];
+  for (const r of rows) {
+    const y1 = r.ap.replace(/^CN/, '').slice(0, 4);
+    const y2 = (r.apd || '').slice(0, 4);
+    if (y1 && y2 && y1 !== y2) warnings.push({ pn: r.pn, ap: r.ap, apd: r.apd, msg: '申请号年份与申请日不一致' });
+    if (!/S$/.test(r.pn)) warnings.push({ pn: r.pn, msg: '非外观设计编号（筛选可能失效）' });
+  }
+  return warnings;
+}
+
+// 翻页收全量，按公开号去重
+async function harvestAll(page, { maxPages = 8, delay = 0 } = {}) {
+  const all = [];
+  let guard = 0, total = null, pagesUsed = 0;
+  while (guard++ < maxPages) {
+    const info = await readPage(page);
+    total = info.total;
+    all.push(...info.rows);
+    pagesUsed++;
+    if (!info.nextEnabled) break;
+    if (all.length >= (total || 0)) break;
+    const moved = await nextPage(page);
+    if (!moved) break;
+    if (delay) await page.waitForTimeout(delay);
+  }
+  const seen = new Set(); const out = [];
+  for (const r of all) { if (seen.has(r.pn)) continue; seen.add(r.pn); out.push(r); }
+  return { rows: out, total, pagesUsed, warnings: auditRows(out) };
+}
+
+// 候选打分：标题命中产品词越多分越高；局部外观（主体/部分）降权提示
+function rankCandidates(rows, keywords = []) {
+  const kws = keywords.filter(Boolean);
+  return rows.map(r => {
+    let score = 0; const hits = [];
+    for (const k of kws) if (r.ti.includes(k)) { score += 2; hits.push(k); }
+    if (/主体|部分|局部|内部|外部/.test(r.ti)) score -= 1;
+    if (/盒|充电/.test(r.ti) && kws.some(k => /盒/.test(k))) score += 1;
+    return { ...r, score, hits };
+  }).sort((a, b) => b.score - a.score || (b.apd > a.apd ? 1 : -1));
+}
+
+// 旧链路（保留兼容，勿用于新任务）
 async function search(page, ctx, { query, designOnly = true, maxPages = 10 }) {
   await page.bringToFront();
   const input = page.locator('input[placeholder*="关键词"]').first();
@@ -194,15 +430,11 @@ async function selectRows(list, count = 1) {
   return done;
 }
 
+// 旧翻页（已废弃）：Element UI 分页器是 .el-pager li.number，不是裸 li
 async function goNext(list, pageNo) {
-  return await list.evaluate((n) => {
-    const lis = [...document.querySelectorAll('li')].filter(e => {
-      const r = e.getBoundingClientRect();
-      return r.top > window.innerHeight * 0.4 && e.textContent.trim() === String(n) && r.width < 80 && r.width > 0;
-    });
-    if (lis.length) { lis[0].click(); return true; }
-    return false;
-  }, pageNo);
+  const li = list.locator('.el-pager li.number').filter({ hasText: new RegExp('^\\s*' + pageNo + '\\s*$') }).first();
+  if (await li.count().catch(() => 0)) { await li.click({ timeout: 8000 }).catch(() => {}); return true; }
+  return false;
 }
 
 function dedupe(recs) {
@@ -296,5 +528,8 @@ async function extractDetail(detailPage, outDir) {
 module.exports = {
   BASE, PROFILE, PORT, SKILL_DIR, sleep,
   cdpAlive, launchChrome, connect, pickPage, isLoginUrl,
-  ensureLoggedIn, search, filterDesign, selectRows, openDetail, extractDetail, readCreds
+  ensureLoggedIn, search, filterDesign, selectRows, openDetail, extractDetail, readCreds,
+  // 新链路
+  checkSession, pickScope, seniorSearch, setPageSize, readPage, nextPage,
+  harvestAll, auditRows, rankCandidates, goNext
 };
