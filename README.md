@@ -39,12 +39,32 @@ CNIPA 专利检索及分析系统（pss-system.cponline.cnipa.gov.cn）
 
 视图尺寸自洽（主/后等高、左右等宽），墨迹包围盒精确到原始上传图的边界，建模时比例可直接对齐。
 
-## 快速开始
+## 快速开始（一条命令一条链）
 
 ```bash
 npm install        # playwright-core + pdfjs-dist + @napi-rs/canvas
 
-# 1. 首次使用：登录 CNIPA（弹出专用 Chrome 窗口，登录态保存在本地档案）
+# 0. 首次：登录 CNIPA（弹出专用 Chrome，登录态存在本地档案；也可放 credentials.json 自动登录）
+node scripts/keepalive.js
+
+# 1. 检索：高级检索 + 外观设计服务端筛选 + 每页 40 翻到底
+node scripts/hunt.js search --name 耳机 --applicant 苹果公司 --kw 耳机,盒 --out ./out/AirPods
+#   → {"ok":true,"total":118,"harvested":118,"candidates":[{"pn":"CN309792845S",...}]}
+
+# 2. 目视确认（不耗配额）：主视图落盘，看一眼像不像
+node scripts/hunt.js verify CN309792845S --out ./out/AirPods
+
+# 3. 下载：先拿验证码图，读 4 位数字后提交，自动解包 + 抽白底视图
+node scripts/hunt.js dl    CN309792845S --out ./out/AirPods
+node scripts/hunt.js dlsub CN309792845S 5575 --out ./out/AirPods
+```
+
+四个子命令的 stdout 都是一行紧凑 JSON，详细日志在 `<out>/_hunt.log`。
+踩坑与选择器变动见 `references/selectors.md`（含 412 挑战、假筛选芯片、innerText 错行三大坑）。
+
+## 传统分步用法
+
+```bash
 node scripts/run.js search --query "遥控器" --max 1
 # 返回 {"code":"NEED_LOGIN"} 时，在弹出的 Chrome 窗口里登录后重跑
 
